@@ -4,6 +4,9 @@ import sys
 import json
 import random
 import time
+import shutil
+import re
+import unicodedata
 
 # --- CONSTANTS ---
 SAVE_FILE = "savegame.json"
@@ -231,7 +234,16 @@ class Game:
             "Orion Venture": {"current_sector": random.randint(1, TOTAL_SECTORS), "credits": 6000}
         }
         self.ai_sightings = []
+        self.captains_log = []
+        self.display_mode = "classic"
         self.update_ai_traders()
+        self.add_log_entry("Campaign initialized. Command deck online.")
+
+    def add_log_entry(self, message):
+        timestamp = f"Day {self.days_elapsed:03d}"
+        self.captains_log.append(f"[{timestamp}] {message}")
+        if len(self.captains_log) > 120:
+            self.captains_log = self.captains_log[-120:]
         
     def update_ai_traders(self):
         self.ai_sightings = []
@@ -331,7 +343,9 @@ class Game:
             "active_event_text": self.active_event_text,
             "active_event_sector": self.active_event_sector,
             "ai_traders": self.ai_traders,
-            "ai_sightings": self.ai_sightings
+            "ai_sightings": self.ai_sightings,
+            "captains_log": self.captains_log,
+            "display_mode": self.display_mode
         }
         try:
             with open(SAVE_FILE, "w") as f:
@@ -375,6 +389,8 @@ class Game:
                 "Orion Venture": {"current_sector": random.randint(1, TOTAL_SECTORS), "credits": 6000}
             })
             self.ai_sightings = state.get("ai_sightings", [])
+            self.captains_log = state.get("captains_log", [])
+            self.display_mode = state.get("display_mode", "classic")
             return True
         except Exception:
             return False
@@ -385,19 +401,11 @@ def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def print_banner():
-    print(fr"""{COLOR_CYAN}{COLOR_BOLD}
- __   __   ___   ___  ___
- \ \ / /  / _ \ |_ _||   \
-  \ V /  | | | | | | | |) |
-   \_/    \___/ |___||___/
-
- ___   ___   ___ __   __  _   _____  _____  _____  ___
-| _ \ | _ \ |_ _|\ \ / / /_\ |_   _||  ___||  ___|| _ \
-|  _/ |   /  | |  \ V / / _ \  | |  |  __| |  __| |   /
-|_|   |_|_\ |___|  \_/ /_/ \_\ |_|  |_____||_____||_|_\
-
-{COLOR_RESET}               == [ THE RETRO BBS COLD WAR SPACE SANDBOX ] ==
-    """)
+    print(
+        f"{COLOR_CYAN}{COLOR_BOLD}VOID PRIVATEER{COLOR_RESET} "
+        f"{COLOR_CYAN}:: Retro BBS Cold-War Space Sandbox{COLOR_RESET}"
+    )
+    print(f"{COLOR_CYAN}{'=' * 64}{COLOR_RESET}")
 
 def press_enter():
     input(f"\n{COLOR_YELLOW}[Press ENTER to continue...]{COLOR_RESET}")
@@ -427,12 +435,186 @@ def show_status(game):
         print(f"Sector Planet: {COLOR_CYAN}{sec['planet']['name']} ({claimed_str}){COLOR_RESET}")
     if sec["hazard"] != "None":
         print(f"{COLOR_RED}⚠️ WARNING: Local {sec['hazard']} present in this sector!{COLOR_RESET}")
-    print(f"{COLOR_CYAN}=========================================={COLOR_RESET}")
-    
-    if game.ai_sightings:
-        print(f"\n{COLOR_CYAN}📡 GALACTIC INTEL & RIVAL ACTIVITY:{COLOR_RESET}")
-        for sighting in game.ai_sightings[:3]:
-            print(f"  - {COLOR_WHITE}{sighting}{COLOR_RESET}")
+
+
+def show_captains_log(game):
+    clear_screen()
+    print_banner()
+    print(f"{COLOR_CYAN}--- CAPTAIN'S LOG ---{COLOR_RESET}")
+    if not game.captains_log:
+        print(f"\n{COLOR_YELLOW}No entries logged yet.{COLOR_RESET}")
+    else:
+        print()
+        for line in game.captains_log[-30:]:
+            print(f" {line}")
+    press_enter()
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(s):
+    return len(ANSI_RE.sub("", s))
+
+
+def _display_width(s):
+    clean = ANSI_RE.sub("", s)
+    width = 0
+    for ch in clean:
+        if unicodedata.combining(ch):
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _slice_display_width(s, max_width):
+    out = []
+    w = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            if out:
+                out.append(ch)
+            continue
+        ch_w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + ch_w > max_width:
+            break
+        out.append(ch)
+        w += ch_w
+    return "".join(out)
+
+
+def _pad_display(s, width):
+    curr = _display_width(s)
+    if curr >= width:
+        return _slice_display_width(s, width)
+    return s + (" " * (width - curr))
+
+
+def _wrap_display_width(text, width):
+    if width <= 1:
+        return [text[:width]] if text else [""]
+    tokens = text.split(" ")
+    lines = []
+    curr = ""
+    for tok in tokens:
+        candidate = tok if not curr else f"{curr} {tok}"
+        if _display_width(candidate) <= width:
+            curr = candidate
+            continue
+        if curr:
+            lines.append(curr)
+            curr = ""
+        if _display_width(tok) <= width:
+            curr = tok
+            continue
+        remainder = tok
+        while _display_width(remainder) > width:
+            piece = _slice_display_width(remainder, width)
+            lines.append(piece)
+            remainder = remainder[len(piece):]
+        curr = remainder
+    if curr:
+        lines.append(curr)
+    return lines if lines else [""]
+
+
+def _boxed_panel_lines(title, lines, width, max_content_rows=None):
+    inner = max(14, width - 2)
+    out = [
+        f"{COLOR_CYAN}╭{'─' * inner}╮{COLOR_RESET}",
+        f"{COLOR_CYAN}│{COLOR_BOLD}{title[:inner].ljust(inner)}{COLOR_RESET}{COLOR_CYAN}│{COLOR_RESET}",
+        f"{COLOR_CYAN}├{'─' * inner}┤{COLOR_RESET}",
+    ]
+    wrapped = []
+    for line in lines:
+        line_txt = str(line)
+        chunks = _wrap_display_width(line_txt, inner)
+        if not chunks:
+            chunks = [""]
+        wrapped.extend(chunks)
+    if max_content_rows is not None and max_content_rows >= 1 and len(wrapped) > max_content_rows:
+        wrapped = wrapped[:max_content_rows]
+        wrapped[-1] = (_slice_display_width(wrapped[-1], max(0, inner - 1)) + "…") if inner >= 1 else wrapped[-1]
+    for chunk in wrapped:
+        out.append(f"{COLOR_CYAN}│{COLOR_RESET}{_pad_display(chunk, inner)}{COLOR_CYAN}│{COLOR_RESET}")
+    out.append(f"{COLOR_CYAN}╰{'─' * inner}╯{COLOR_RESET}")
+    return out
+
+
+def _print_two_columns(left_lines, right_lines, gap=2):
+    left_w = max(_visible_len(l) for l in left_lines) if left_lines else 0
+    rows = max(len(left_lines), len(right_lines))
+    for i in range(rows):
+        left = left_lines[i] if i < len(left_lines) else " " * left_w
+        right = right_lines[i] if i < len(right_lines) else ""
+        pad = max(0, left_w - _visible_len(left))
+        print(f"{left}{' ' * (pad + gap)}{right}")
+
+
+def show_command_center(game):
+    sec = game.galaxy[game.current_sector]
+    term = shutil.get_terminal_size(fallback=(120, 40))
+    cols, lines = term.columns, term.lines
+    two_col = cols >= 108
+    panel_w = max(38, min(72, (cols - 4) // 2)) if two_col else max(44, min(96, cols - 6))
+
+    left_top = [
+        f"Day: {game.days_elapsed}   Sector: {game.current_sector}",
+        f"Credits: {game.credits:,} CR",
+        f"Net Worth: {game.get_net_worth():,} CR",
+        f"Fuel: {game.fuel}/{game.max_fuel} LY",
+        f"Hull: {game.hull}%   Shields: {game.shields}/{game.max_shields}%",
+        f"Weapons: {game.weapon_power} MW   Cargo: {sum(game.cargo.values())}/{game.cargo_capacity}",
+    ]
+    right_top = [
+        f"Sector Name: {sec['name']}",
+        f"Warp Links: {', '.join(map(str, sorted(sec['connections'])))}",
+        f"Port: {sec['port']['name'] if sec['port'] else 'None'}",
+        f"Planet: {sec['planet']['name'] if sec['planet'] else 'None'}",
+        f"Hazard: {sec['hazard']}",
+        f"Display Mode: COMMAND CENTER",
+    ]
+
+    cargo_lines = [f"{g:<14} {q:>3}" for g, q in game.cargo.items() if q > 0]
+    if not cargo_lines:
+        cargo_lines = ["No active cargo manifests."]
+
+    feed_lines = []
+    if game.active_event_text:
+        feed_lines.append(game.active_event_text)
+    feed_lines.extend(game.ai_sightings[:3])
+    if not feed_lines:
+        feed_lines = ["No new galactic traffic."]
+
+    clear_screen()
+    print_banner()
+    # Estimate available rows after banner/spacing and cap panel heights.
+    # Panel framing consumes 4 rows; content rows are dynamic.
+    avail = max(12, lines - 19)
+    if two_col:
+        block_rows = max(4, avail // 2)
+        content_rows = max(2, block_rows - 4)
+        top_left = _boxed_panel_lines("SHIP STATUS", left_top, panel_w, content_rows)
+        top_right = _boxed_panel_lines("LOCAL INTEL", right_top, panel_w, content_rows)
+        _print_two_columns(top_left, top_right, gap=2)
+        print()
+        bottom_left = _boxed_panel_lines("CARGO MANIFEST", cargo_lines, panel_w, content_rows)
+        bottom_right = _boxed_panel_lines("GALACTIC FEED", feed_lines, panel_w, content_rows)
+        _print_two_columns(bottom_left, bottom_right, gap=2)
+    else:
+        # Stack panels for narrower terminals.
+        content_rows = max(2, (avail // 4) - 1)
+        for title, lineset in [
+            ("SHIP STATUS", left_top),
+            ("LOCAL INTEL", right_top),
+            ("CARGO MANIFEST", cargo_lines),
+            ("GALACTIC FEED", feed_lines),
+        ]:
+            for ln in _boxed_panel_lines(title, lineset, panel_w, content_rows):
+                print(ln)
 
 
 def visit_black_market(game):
@@ -610,6 +792,7 @@ def dock_at_port(game):
                 game.credits -= total_cost
                 game.cargo[good] += qty
                 port["market"][good]["stock"] -= qty
+                game.add_log_entry(f"Bought {qty} {good} at {port['name']} for {total_cost} CR.")
                 print(f"{COLOR_GREEN}Success! Purchased {qty} {good} for {total_cost} CR.{COLOR_RESET}")
                 press_enter()
                 
@@ -647,6 +830,7 @@ def dock_at_port(game):
             game.credits += total_gain
             game.cargo[good] -= qty
             port["market"][good]["stock"] += qty
+            game.add_log_entry(f"Sold {qty} {good} at {port['name']} for {total_gain} CR.")
             print(f"{COLOR_GREEN}Success! Sold {qty} {good} for {total_gain} CR.{COLOR_RESET}")
             press_enter()
             
@@ -790,6 +974,7 @@ def colonize_planet(game):
                     p["colonists"] = 100
                     p["income"] = 200
                     game.upgrades_value += 1500
+                    game.add_log_entry(f"Established colony on {p['name']} (Sector {game.current_sector}).")
                     print(f"{COLOR_GREEN}Success! You have founded a colony on {p['name']}.{COLOR_RESET}")
                 else:
                     print(f"{COLOR_RED}You don't have enough credits to claim this planet!{COLOR_RESET}")
@@ -799,6 +984,7 @@ def colonize_planet(game):
                     game.credits -= 400
                     p["colonists"] += 50
                     p["income"] += 50
+                    game.add_log_entry(f"Expanded colony {p['name']}: +50 colonists.")
                     print(f"{COLOR_GREEN}Transport shuttles have landed. New colony population: {p['colonists']}{COLOR_RESET}")
                 else:
                     print(f"{COLOR_RED}Insufficient credits to fund colonist transports!{COLOR_RESET}")
@@ -808,6 +994,7 @@ def colonize_planet(game):
                 if game.credits >= 600:
                     game.credits -= 600
                     p["defense"] += 1
+                    game.add_log_entry(f"Upgraded orbital defenses on {p['name']} to {p['defense']} MW.")
                     print(f"{COLOR_GREEN}Planetary defense grids augmented successfully.{COLOR_RESET}")
                 else:
                     print(f"{COLOR_RED}Insufficient credits for defense array!{COLOR_RESET}")
@@ -819,6 +1006,7 @@ def colonize_planet(game):
                 if game.credits >= 1000:
                     game.credits -= 1000
                     p["income"] += 100
+                    game.add_log_entry(f"Industrial upgrade commissioned on {p['name']} (+100 CR/day).")
                     print(f"{COLOR_GREEN}Planetary industry upgraded! Net daily return: {p['income']} CR{COLOR_RESET}")
                 else:
                     print(f"{COLOR_RED}Insufficient credits for industry upgrades!{COLOR_RESET}")
@@ -933,6 +1121,7 @@ def handle_combat_encounter(game):
                 escape_sector = random.choice(game.galaxy[game.current_sector]["connections"])
                 game.current_sector = escape_sector
                 game.explored_sectors.add(escape_sector)
+                game.add_log_entry(f"Escaped pirate encounter via emergency warp to Sector {escape_sector}.")
                 print(f"{COLOR_GREEN}Success! You hyperspace warped to Sector {escape_sector} and escaped the ambush!{COLOR_RESET}")
                 press_enter()
                 return
@@ -949,6 +1138,7 @@ def handle_combat_encounter(game):
             
     if game.hull <= 0:
         print(f"\n{COLOR_RED}💥 HULL COLLAPSE DETECTED! Your vessel is shattered to scrap.{COLOR_RESET}")
+        game.add_log_entry("Critical hull failure during pirate encounter.")
         game.hull = 20
         loss = int(game.credits * 0.25)
         game.credits -= loss
@@ -960,6 +1150,7 @@ def handle_combat_encounter(game):
     elif pirate_hull <= 0:
         reward = random.randint(300, 1200)
         game.credits += reward
+        game.add_log_entry(f"Pirate neutralized in Sector {game.current_sector}; salvage {reward} CR.")
         print(f"\n{COLOR_GREEN}🎯 TARGET OBLITERATED! You salvage the pirate's debris field for {reward} CR.{COLOR_RESET}")
         press_enter()
 
@@ -1052,6 +1243,7 @@ def trigger_patrol_scan(game):
 def execute_warp_landing(game, dest):
     game.current_sector = dest
     game.explored_sectors.add(dest)
+    game.add_log_entry(f"Warped to Sector {dest}.")
     new_sec = game.galaxy[dest]
     
     # 1. Apply Blockade guaranteed hazard/pirates if blockade active in dest
@@ -1252,9 +1444,12 @@ and achieved ultimate economic dominance in this galaxy!
             """)
             break
             
-        clear_screen()
-        print_banner()
-        show_status(g)
+        if g.display_mode == "command_center":
+            show_command_center(g)
+        else:
+            clear_screen()
+            print_banner()
+            show_status(g)
         
         print("\nCommands:")
         print("1. Dock at Port & Trade / Upgrade")
@@ -1264,9 +1459,11 @@ and achieved ultimate economic dominance in this galaxy!
         print("5. Navigation Computer (Plot Route to any Sector)")
         print("6. End Day / Recharge Fuel (Saves state, advances cycle)")
         print("7. Save Game Status")
-        print("8. Abandon Game and Exit")
-        
-        cmd = input(f"\n{COLOR_YELLOW}Enter navigational choice (1-8): {COLOR_RESET}").strip()
+        print("8. Captain's Log")
+        print("9. Toggle Display Mode (Classic / Command Center)")
+        print("10. Abandon Game and Exit")
+
+        cmd = input(f"\n{COLOR_YELLOW}Enter navigational choice (1-10): {COLOR_RESET}").strip()
         
         if cmd == "1":
             dock_at_port(g)
@@ -1335,8 +1532,11 @@ and achieved ultimate economic dominance in this galaxy!
             print(f" - Shields completely recycled and recharged to {g.max_shields}%.")
             if passive_income > 0:
                 print(f" - Collected {COLOR_GREEN}{passive_income} CR{COLOR_RESET} of colonial passive income from planets!")
+                g.add_log_entry(f"Collected {passive_income} CR passive colonial income.")
             if g.active_event_text:
                 print(f" - {COLOR_YELLOW}{COLOR_BOLD}DAILY EVENT INCOMING:{COLOR_RESET} {g.active_event_text}")
+                g.add_log_entry(f"Daily event: {g.active_event}.")
+            g.add_log_entry("Day ended; ship refueled and shields restored.")
             print(f"Campaign state automatically cached to '{SAVE_FILE}'.")
             press_enter()
             
@@ -1348,6 +1548,15 @@ and achieved ultimate economic dominance in this galaxy!
             press_enter()
             
         elif cmd == "8":
+            show_captains_log(g)
+            
+        elif cmd == "9":
+            g.display_mode = "command_center" if g.display_mode == "classic" else "classic"
+            g.add_log_entry(f"Display mode set to {g.display_mode}.")
+            print(f"{COLOR_GREEN}Display mode switched to {g.display_mode}.{COLOR_RESET}")
+            press_enter()
+            
+        elif cmd == "10":
             print("\nSafe travels, Privateer!")
             break
 

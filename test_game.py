@@ -53,6 +53,7 @@ class TestVoidPrivateer(unittest.TestCase):
         self.game.credits = 5500
         self.game.current_sector = 42
         self.game.cargo["Weapons"] = 1
+        self.game.add_log_entry("Test checkpoint reached.")
         
         # Save game
         save_success = self.game.save()
@@ -69,6 +70,7 @@ class TestVoidPrivateer(unittest.TestCase):
         self.assertEqual(new_game.current_sector, 42)
         self.assertEqual(new_game.cargo["Weapons"], 1)
         self.assertEqual(new_game.seed, 1234)
+        self.assertIn("Test checkpoint reached.", "\n".join(new_game.captains_log))
 
     def test_shortest_path_routing(self):
         # Let's verify route from Sector 1 to Sector 5
@@ -119,6 +121,12 @@ class TestVoidPrivateer(unittest.TestCase):
         
         # Verify passive income is counted correctly in get_net_worth and End Day loops
         self.assertEqual(self.game.galaxy[planet_sec]["planet"]["income"], 350)
+
+    def test_captains_log_is_capped(self):
+        for i in range(150):
+            self.game.add_log_entry(f"Log line {i}")
+        self.assertEqual(len(self.game.captains_log), 120)
+        self.assertTrue(self.game.captains_log[-1].endswith("Log line 149"))
 
 if __name__ == "__main__":
     unittest.main()
