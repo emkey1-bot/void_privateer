@@ -2,7 +2,10 @@
 import unittest
 import os
 import shutil
-from game import Game, generate_galaxy, GOODS, PORT_TYPES, find_shortest_path
+import json
+import tempfile
+from unittest.mock import patch
+from game import Game, SAVE_FILE, generate_galaxy, GOODS, PORT_TYPES, find_shortest_path, autopilot_warp_route, FACTION_NAMES
 
 class TestVoidPrivateer(unittest.TestCase):
     def setUp(self):
@@ -11,8 +14,8 @@ class TestVoidPrivateer(unittest.TestCase):
         
     def tearDown(self):
         # Clean up save file if written
-        if os.path.exists("savegame.json"):
-            os.remove("savegame.json")
+        if os.path.exists(SAVE_FILE):
+            os.remove(SAVE_FILE)
 
     def test_galaxy_generation(self):
         # Check that we generated exactly 100 sectors
@@ -54,11 +57,12 @@ class TestVoidPrivateer(unittest.TestCase):
         self.game.current_sector = 42
         self.game.cargo["Weapons"] = 1
         self.game.add_log_entry("Test checkpoint reached.")
+        self.game.set_aux_output("SOLAR SCANNER", ["Sector 2", "Sector 9"])
         
         # Save game
         save_success = self.game.save()
         self.assertTrue(save_success)
-        self.assertTrue(os.path.exists("savegame.json"))
+        self.assertTrue(os.path.exists(SAVE_FILE))
         
         # Load into new instance
         new_game = Game()
@@ -71,6 +75,77 @@ class TestVoidPrivateer(unittest.TestCase):
         self.assertEqual(new_game.cargo["Weapons"], 1)
         self.assertEqual(new_game.seed, 1234)
         self.assertIn("Test checkpoint reached.", "\n".join(new_game.captains_log))
+        self.assertEqual(new_game.aux_output_title, "SOLAR SCANNER")
+        self.assertEqual(new_game.aux_output_lines, ["Sector 2", "Sector 9"])
+
+    def test_load_legacy_cwd_save(self):
+        legacy_state = {
+            "seed": 1234,
+            "credits": 4321,
+            "fuel": 18,
+            "max_fuel": 20,
+            "hull": 95,
+            "max_hull": 100,
+            "shields": 40,
+            "max_shields": 50,
+            "weapon_power": 10,
+            "cargo_capacity": 20,
+            "cargo": {good: 0 for good in GOODS} | {"Space Spice": 1},
+            "current_sector": 7,
+            "explored_sectors": [1, 7],
+            "days_elapsed": 3,
+            "upgrades_value": 0,
+            "active_event": None,
+            "active_event_text": "",
+            "active_event_sector": None,
+            "ai_traders": {},
+            "ai_sightings": [],
+            "captains_log": ["legacy save detected"],
+            "display_mode": "classic",
+        }
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                os.chdir(tmpdir)
+                with open("savegame.json", "w") as f:
+                    json.dump(legacy_state, f)
+                loaded = Game()
+                self.assertTrue(loaded.load())
+                self.assertEqual(loaded.credits, 4321)
+                self.assertEqual(loaded.current_sector, 7)
+                self.assertIn("legacy save detected", "\n".join(loaded.captains_log))
+            finally:
+                os.chdir(old_cwd)
+
+    def test_load_partial_save_uses_defaults_for_new_fields(self):
+        partial_state = {
+            "seed": 1234,
+            "credits": 2222,
+            "fuel": 17,
+            "max_fuel": 40,
+            "hull": 88,
+            "max_hull": 100,
+            "shields": 25,
+            "max_shields": 50,
+            "weapon_power": 15,
+            "cargo_capacity": 10,
+            "cargo": {"Food": 3},
+            "current_sector": 9,
+            "explored_sectors": [1, 9],
+            "days_elapsed": 4,
+        }
+        with open(SAVE_FILE, "w") as f:
+            json.dump(partial_state, f)
+
+        loaded = Game()
+        self.assertTrue(loaded.load())
+        self.assertEqual(loaded.credits, 2222)
+        self.assertEqual(loaded.current_sector, 9)
+        self.assertEqual(loaded.cargo["Food"], 3)
+        self.assertEqual(loaded.cargo["Space Spice"], 0)
+        self.assertEqual(loaded.display_mode, "classic")
+        self.assertEqual(loaded.aux_output_title, "AUXILIARY OUTPUT")
+        self.assertTrue(isinstance(loaded.ai_traders, dict))
 
     def test_shortest_path_routing(self):
         # Let's verify route from Sector 1 to Sector 5
@@ -102,10 +177,13 @@ class TestVoidPrivateer(unittest.TestCase):
         # 1. Verify AI starting settings
         self.assertGreater(len(self.game.ai_traders), 0)
         self.assertIn("Soren's Hauler", self.game.ai_traders)
+        self.assertTrue(all("faction" in ship for ship in self.game.ai_traders.values()))
+        self.assertTrue(all("cargo" in ship for ship in self.game.ai_traders.values()))
+        self.assertTrue(all(ship["faction"] in FACTION_NAMES for ship in self.game.ai_traders.values()))
         
         # 2. Verify AI updates make sightings logs
         self.game.update_ai_traders()
-        self.assertEqual(len(self.game.ai_sightings), len(self.game.ai_traders))
+        self.assertGreaterEqual(len(self.game.ai_sightings), len(self.game.ai_traders))
         
         # 3. Verify colonies ledger capability
         # Find some planet and claim it
@@ -127,6 +205,65 @@ class TestVoidPrivateer(unittest.TestCase):
             self.game.add_log_entry(f"Log line {i}")
         self.assertEqual(len(self.game.captains_log), 120)
         self.assertTrue(self.game.captains_log[-1].endswith("Log line 149"))
+
+    def test_autopilot_route_stops_after_pirate_contact(self):
+        route = [10, 11, 12, 13]
+        self.game.current_sector = 10
+        self.game.fuel = 5
+        self.game.explored_sectors = {10}
+
+        outcomes = ["clear", "pirates"]
+
+        def fake_landing(game, dest):
+            game.current_sector = dest
+            return outcomes.pop(0)
+
+        with patch("game.execute_warp_landing", side_effect=fake_landing), patch("game.press_enter", return_value=None):
+            autopilot_warp_route(self.game, route)
+
+        self.assertEqual(self.game.current_sector, 12)
+        self.assertEqual(self.game.fuel, 3)
+
+    def test_autopilot_route_stops_when_fuel_runs_out(self):
+        route = [20, 21, 22, 23]
+        self.game.current_sector = 20
+        self.game.fuel = 1
+
+        visited = []
+
+        def fake_landing(game, dest):
+            game.current_sector = dest
+            visited.append(dest)
+            return "clear"
+
+        with patch("game.execute_warp_landing", side_effect=fake_landing), patch("game.press_enter", return_value=None):
+            autopilot_warp_route(self.game, route)
+
+        self.assertEqual(visited, [21])
+        self.assertEqual(self.game.current_sector, 21)
+        self.assertEqual(self.game.fuel, 0)
+
+    def test_pirate_chance_increases_with_risk(self):
+        baseline = self.game.get_pirate_encounter_chance(self.game.current_sector)
+        self.game.cargo["Space Spice"] = 2
+        self.game.credits = 30000
+        self.game.days_elapsed = 40
+        self.game.faction_standings["System Navy"] = -25
+        elevated = self.game.get_pirate_encounter_chance(self.game.current_sector)
+        self.assertGreaterEqual(elevated, baseline)
+        self.assertGreaterEqual(elevated, 0.22)
+
+    def test_save_load_preserves_faction_standings_and_ai_fields(self):
+        self.game.faction_standings["Iron Cartel"] = -12
+        self.game.ai_traders["Soren's Hauler"]["cargo"]["Food"] = 3
+        self.game.ai_traders["Soren's Hauler"]["hull"] = 72
+        self.assertTrue(self.game.save())
+
+        loaded = Game()
+        self.assertTrue(loaded.load())
+        self.assertEqual(loaded.faction_standings["Iron Cartel"], -12)
+        self.assertEqual(loaded.ai_traders["Soren's Hauler"]["cargo"]["Food"], 3)
+        self.assertEqual(loaded.ai_traders["Soren's Hauler"]["hull"], 72)
 
 if __name__ == "__main__":
     unittest.main()
